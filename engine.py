@@ -15,7 +15,10 @@ import os
 import sys
 import torch
 import util.misc as utils
+from util import box_ops
 from typing import Iterable
+import tqdm
+import json
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -106,3 +109,51 @@ def evaluate_swig(model, criterion, data_loader, device, output_dir):
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
     return stats
+
+@torch.no_grad()
+def predict_eval_swig(model, data_loader, device, idx_to_verb, idx_to_role, vidx_ridx, idx_to_class):
+    model.eval()
+    preds = {}
+    for samples, targets in tqdm(data_loader):
+        samples = samples.to(device)
+        targets = [{k: v.to(device) if type(v) is not str else v for k, v in t.items()} for t in targets]
+
+        outputs = model(samples, targets)
+        for i, info in enumerate(targets):
+            image_name = info['img_name'].split('/')[-1]
+            pred_verb = outputs['pred_verb'][i]
+            pred_noun = outputs['pred_noun'][i]
+            pred_bbox = outputs['pred_bbox'][i]
+            pred_bbox_conf = outputs['pred_bbox_conf'][i]
+            top1_verb = torch.topk(pred_verb, k=1, dim=0)[1].item()
+            roles = vidx_ridx[top1_verb]
+            num_roles = len(roles)
+            verb_label = idx_to_verb[top1_verb]
+            role_labels = []
+            noun_labels = []
+            for i in range(num_roles):
+                top1_noun = torch.topk(pred_noun[i], k=1, dim=0)[1].item()
+                role_labels.append(idx_to_role[roles[i]])
+                noun_labels.append(idx_to_class[top1_noun])
+            mw, mh = info['max_width'], info['max_height']
+            w, h = info['width'], info['height']
+            shift_0, shift_1, scale  = info['shift_0'], info['shift_1'], info['scale']
+            pb_xyxy = box_ops.swig_box_cxcywh_to_xyxy(pred_bbox.clone(), mw, mh, device=device)
+            for i in range(num_roles):
+                pb_xyxy[i][0] = max(pb_xyxy[i][0] - shift_1, 0)
+                pb_xyxy[i][1] = max(pb_xyxy[i][1] - shift_0, 0)
+                pb_xyxy[i][2] = max(pb_xyxy[i][2] - shift_1, 0)
+                pb_xyxy[i][3] = max(pb_xyxy[i][3] - shift_0, 0)
+                # locate predicted boxes within image (processing w/ image width & height)
+                pb_xyxy[i][0] = min(pb_xyxy[i][0], w)
+                pb_xyxy[i][1] = min(pb_xyxy[i][1], h)
+                pb_xyxy[i][2] = min(pb_xyxy[i][2], w)
+                pb_xyxy[i][3] = min(pb_xyxy[i][3], h)
+            pb_xyxy /= scale
+
+            preds[image_name] = {
+                "verb": top1_verb,
+                "nouns": {role:noun for role, noun in zip(role_labels, noun_labels)},
+                "boxes": {role_labels[i]: list(pb_xyxy[i]) if pred_bbox_conf[i] >= 0 else None for i in range(num_roles)}
+            }
+    return preds

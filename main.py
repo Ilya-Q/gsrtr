@@ -18,7 +18,7 @@ import datasets
 import util.misc as utils
 from torch.utils.data import DataLoader, DistributedSampler
 from datasets import build_dataset
-from engine import evaluate_swig, train_one_epoch
+from engine import evaluate_swig, train_one_epoch, predict_eval_swig
 from models import build_model
 from pathlib import Path
 
@@ -66,6 +66,7 @@ def get_args_parser():
     parser.add_argument('--swig_path', type=str, default="SWiG")
     parser.add_argument('--dev', default=False, action='store_true')
     parser.add_argument('--test', default=False, action='store_true')
+    parser.add_argument('--pred', default=False, action='store_true')
 
     # Etc...
     parser.add_argument('--inference', default=False)
@@ -99,6 +100,9 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    if args.pred:
+        args.test = True
 
     # check dataset
     if args.dataset_file == "swig":
@@ -180,6 +184,13 @@ def main(args):
             data_loader = data_loader_val 
         elif args.test:
             data_loader = data_loader_test
+
+        if args.pred:
+            preds = predict_eval_swig(model, device, idx_to_verb=args.idx_to_verb, idx_to_role=args.idx_to_role, vidx_ridx=args.vidx_ridx, 
+              idx_to_class=args.idx_to_class)
+            with (output_dir / "results.json").open("a") as f:
+                json.dump(f, preds)
+            return None
 
         test_stats = evaluate_swig(model, criterion, data_loader, device, args.output_dir)
         log_stats = {**{f'test_{k}': v for k, v in test_stats.items()}}
